@@ -1,7 +1,7 @@
 {
   "name": "backend",
   "version": "1.0.0",
-  "main": "server.js",
+  "main": "db.js",
   "dependencies": {
     "abbrev": "^1.1.1",
     "accepts": "^1.3.8",
@@ -26,6 +26,7 @@
     "content-disposition": "^0.5.4",
     "content-type": "^1.0.5",
     "cookie": "^0.7.1",
+    "cookie-parser": "^1.4.7",
     "cookie-signature": "^1.0.6",
     "cors": "^2.8.5",
     "debug": "^2.6.9",
@@ -140,6 +141,7 @@
     "unpipe": "^1.0.0",
     "util-deprecate": "^1.0.2",
     "utils-merge": "^1.0.1",
+    "uuid": "^11.1.0",
     "vary": "^1.1.2",
     "webidl-conversions": "^7.0.0",
     "whatwg-url": "^14.2.0",
@@ -152,6 +154,7 @@
     "start": "node server.js"
   },
   "keywords": [],
+  "type": "module",
   "author": "",
   "license": "ISC",
   "description": ""
