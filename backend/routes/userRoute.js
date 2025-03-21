@@ -7,7 +7,9 @@ const getClientIP = (req) => {
   const forwarded = req.headers["x-forwarded-for"];
   return forwarded ? forwarded.split(",")[0].trim() : req.socket.remoteAddress;
 };
-
+router.get("/init", (req, res) => {
+  res.json({ message: "Session initialized" });
+});
 router.post("/claim-coupon", async (req, res) => {
   const ip = getClientIP(req);
   const sessionId = req.cookies.sessionId;
