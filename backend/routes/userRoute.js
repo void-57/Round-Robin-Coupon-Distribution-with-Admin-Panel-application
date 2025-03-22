@@ -4,40 +4,51 @@ import Coupon from "../models/Coupon.js";
 import ClaimHistory from "../models/ClaimHistory.js";
 import { v4 as uuidv4 } from "uuid";
 
-const CLAIM_COOLDOWN = 2 * 60 * 1000;
+const IP_COOLDOWN_MINUTES = 3;
+const COOKIE_COOLDOWN_MINUTES = 2;
 
-const getClientIP = (req) => {
-  const forwarded = req.headers["x-forwarded-for"];
-  return forwarded ? forwarded.split(",")[0].trim() : req.socket.remoteAddress;
+const getClientIp = (req) => {
+  const forwardedFor = req.headers["x-forwarded-for"];
+  if (forwardedFor) {
+    return forwardedFor.split(",")[0].trim();
+  }
+
+  const realIp = req.headers["x-real-ip"];
+  if (realIp) {
+    return realIp;
+  }
+
+  const ip = req.socket.remoteAddress;
+  if (ip === "::1" || ip === "::ffff:127.0.0.1") {
+    return "127.0.0.1";
+  }
+
+  if (ip.startsWith("::ffff:")) {
+    return ip.substring(7);
+  }
+
+  return ip;
 };
 
 router.get("/init", (req, res) => {
-  try {
-    console.log("Checking for sessionId cookie...");
-    if (!req.cookies.sessionId) {
-      console.log("No sessionId found. Generating new sessionId...");
-      const sessionId = uuidv4();
-
-      res.cookie("sessionId", sessionId, {
-        httpOnly: true,
-        maxAge: CLAIM_COOLDOWN,
-        domain: "localhost",
-        sameSite: "lax",
-        secure: process.env.NODE_ENV === "production",
-      });
-      console.log("sessionId cookie set:", sessionId);
-    } else {
-      console.log("Existing sessionId found:", req.cookies.sessionId);
-    }
-    res.json({ message: "Session initialized" });
-  } catch (err) {
-    console.error("Error in /init:", err);
-    res.status(500).json({ message: "Internal server error" });
+  if (!req.cookies.sessionId) {
+    const sessionId = uuidv4();
+    res.cookie("sessionId", sessionId, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "strict",
+      maxAge: 24 * 60 * 60 * 1000, // 24 hours
+    });
   }
+  res.json({ message: "Session initialized" });
+});
+
+router.get("/check-session", (req, res) => {
+  res.json({ hasSession: !!req.cookies.sessionId });
 });
 
 router.get("/claim-status", async (req, res) => {
-  const ip = getClientIP(req);
+  const ip = getClientIp(req);
   const sessionId = req.cookies.sessionId;
 
   if (!sessionId) {
@@ -47,7 +58,7 @@ router.get("/claim-status", async (req, res) => {
   try {
     const recentClaim = await ClaimHistory.findOne({
       claimedByIP: ip,
-      claimedAt: { $gt: new Date(Date.now() - CLAIM_COOLDOWN) },
+      claimedAt: { $gt: new Date(Date.now() - IP_COOLDOWN_MINUTES * 60000) },
     }).sort({ claimedAt: -1 });
 
     if (recentClaim) {
@@ -74,8 +85,8 @@ router.get("/claim-status", async (req, res) => {
   }
 });
 
-router.post("/claim-coupon", async (req, res) => {
-  const ip = getClientIP(req);
+router.get("/time-until-next-claim", async (req, res) => {
+  const ip = getClientIp(req);
   const sessionId = req.cookies.sessionId;
 
   if (!sessionId) {
@@ -83,19 +94,94 @@ router.post("/claim-coupon", async (req, res) => {
   }
 
   try {
-    const recentClaim = await ClaimHistory.findOne({
+    
+    const lastIpClaim = await ClaimHistory.findOne({
       claimedByIP: ip,
-      claimedAt: { $gt: new Date(Date.now() - CLAIM_COOLDOWN) },
+      claimedAt: { $gt: new Date(Date.now() - IP_COOLDOWN_MINUTES * 60000) },
+    }).sort({ claimedAt: -1 });
+
+    const lastSessionClaim = await ClaimHistory.findOne({
+      claimedBySession: sessionId,
+      claimedAt: {
+        $gt: new Date(Date.now() - COOKIE_COOLDOWN_MINUTES * 60000),
+      },
+    }).sort({ claimedAt: -1 });
+
+    const now = Date.now();
+    let cookieNextClaimTime = null;
+    let ipNextClaimTime = null;
+
+    if (lastSessionClaim) {
+      cookieNextClaimTime = new Date(
+        lastSessionClaim.claimedAt.getTime() + COOKIE_COOLDOWN_MINUTES * 60000
+      );
+    }
+
+    if (lastIpClaim) {
+      ipNextClaimTime = new Date(
+        lastIpClaim.claimedAt.getTime() + IP_COOLDOWN_MINUTES * 60000
+      );
+    }
+
+    const canClaim =
+      (!cookieNextClaimTime || now >= cookieNextClaimTime.getTime()) &&
+      (!ipNextClaimTime || now >= ipNextClaimTime.getTime());
+
+    res.json({
+      canClaim,
+      nextClaimTime: cookieNextClaimTime?.toISOString() || null,
+      ipCooldownTime: ipNextClaimTime?.toISOString() || null,
     });
-    if (recentClaim) {
-      return res.status(400).json({
-        message: "Please wait 2 minutes before claiming another coupon",
+  } catch (err) {
+    console.error("Error checking time until next claim:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+router.post("/claim-coupon", async (req, res) => {
+  const ip = getClientIp(req);
+  const sessionId = req.cookies.sessionId;
+
+  if (!sessionId) {
+    return res.status(400).json({ message: "Session ID not found" });
+  }
+
+  try {
+    const lastIpClaim = await ClaimHistory.findOne({
+      claimedByIP: ip,
+      claimedAt: { $gt: new Date(Date.now() - IP_COOLDOWN_MINUTES * 60000) },
+    }).sort({ claimedAt: -1 });
+
+    if (lastIpClaim) {
+      const ipNextClaimTime = new Date(
+        lastIpClaim.claimedAt.getTime() + IP_COOLDOWN_MINUTES * 60000
+      );
+      return res.status(429).json({
+        message: "Please wait for the IP cooldown to end",
+        ipCooldownTime: ipNextClaimTime.toISOString(),
+      });
+    }
+
+    const lastSessionClaim = await ClaimHistory.findOne({
+      claimedBySession: sessionId,
+      claimedAt: {
+        $gt: new Date(Date.now() - COOKIE_COOLDOWN_MINUTES * 60000),
+      },
+    }).sort({ claimedAt: -1 });
+
+    if (lastSessionClaim) {
+      const cookieNextClaimTime = new Date(
+        lastSessionClaim.claimedAt.getTime() + COOKIE_COOLDOWN_MINUTES * 60000
+      );
+      return res.status(429).json({
+        message: "Please wait for the cookie cooldown to end",
+        nextClaimTime: cookieNextClaimTime.toISOString(),
       });
     }
 
     const coupon = await Coupon.findOne({ isActive: true, isClaimed: false });
     if (!coupon) {
-      return res.status(400).json({ message: "No coupons available" });
+      return res.status(404).json({ message: "No coupons available" });
     }
 
     coupon.isClaimed = true;
@@ -111,47 +197,22 @@ router.post("/claim-coupon", async (req, res) => {
     });
     await claimHistory.save();
 
-    const nextClaimTime = new Date(Date.now() + CLAIM_COOLDOWN);
-
+    const now = new Date();
     res.json({
       message: "Coupon claimed successfully",
-      coupon,
-      nextClaimTime: nextClaimTime.toISOString(),
+      coupon: {
+        code: coupon.code,
+        claimedAt: coupon.claimedAt,
+      },
+      nextClaimTime: new Date(
+        now.getTime() + COOKIE_COOLDOWN_MINUTES * 60000
+      ).toISOString(),
+      ipCooldownTime: new Date(
+        now.getTime() + IP_COOLDOWN_MINUTES * 60000
+      ).toISOString(),
     });
   } catch (err) {
     console.error("Error claiming coupon:", err);
-    res.status(500).json({ message: "Server error" });
-  }
-});
-
-router.get("/time-until-next-claim", async (req, res) => {
-  const ip = getClientIP(req);
-
-  try {
-    const recentClaim = await ClaimHistory.findOne({
-      claimedByIP: ip,
-      claimedAt: { $gt: new Date(Date.now() - CLAIM_COOLDOWN) },
-    }).sort({ claimedAt: -1 });
-
-    if (recentClaim) {
-      const claimTime = new Date(recentClaim.claimedAt).getTime();
-      const nextClaimTime = new Date(claimTime + CLAIM_COOLDOWN);
-      const timeRemaining = nextClaimTime.getTime() - Date.now();
-
-      return res.json({
-        canClaim: false,
-        timeRemaining: timeRemaining,
-        nextClaimTime: nextClaimTime.toISOString(),
-      });
-    }
-
-    return res.json({
-      canClaim: true,
-      timeRemaining: 0,
-      nextClaimTime: new Date().toISOString(),
-    });
-  } catch (err) {
-    console.error("Error checking time until next claim:", err);
     res.status(500).json({ message: "Server error" });
   }
 });
