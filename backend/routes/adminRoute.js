@@ -21,9 +21,9 @@ router.post("/login", async (req, res) => {
     });
     res.cookie("token", token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production", 
+      secure: process.env.NODE_ENV === "production",
       sameSite: "strict",
-      maxAge: 60 * 60 * 1000, 
+      maxAge: 60 * 60 * 1000,
     });
 
     res.json({ message: "Login successful" });
@@ -78,13 +78,28 @@ router.get("/claim-history", authMiddleware, async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
+router.get("/check-auth", async (req, res) => {
+  const token = req.cookies.token;
 
+  if (!token) {
+    return res.json({ isAuthenticated: false });
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    res.json({ isAuthenticated: true });
+  } catch (err) {
+    res.json({ isAuthenticated: false });
+  }
+});
 router.post("/logout", (req, res) => {
   res.clearCookie("token", {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "strict",
+    path: "/",
   });
+
   res.json({ message: "Logout successful" });
 });
 
